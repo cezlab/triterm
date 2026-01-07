@@ -437,13 +437,13 @@ export function UserManagement() {
               <Input
                 id="password"
                 type="password"
-                placeholder="Min 12 chars, uppercase, lowercase, number, special"
+                placeholder="Min 8 chars, uppercase, lowercase, number, special"
                 value={createFormData.password}
                 onChange={(e) => setCreateFormData({ ...createFormData, password: e.target.value })}
                 disabled={creating}
               />
               <p className="text-xs text-muted-foreground">
-                Min 12 characters with uppercase, lowercase, number, and special character
+                Min 8 characters with uppercase, lowercase, number, and special character
               </p>
             </div>
 

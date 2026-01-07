@@ -26,10 +26,11 @@ RUN cd server && npm run build
 # Stage 2: Production
 FROM node:22-alpine
 
-# Install production dependencies
+# Install production dependencies and bash (required for terminal)
 RUN apk add --no-cache \
     ca-certificates \
-    tzdata
+    tzdata \
+    bash
 
 # Create app user
 RUN addgroup -g 1001 -S nodejs && \

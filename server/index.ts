@@ -7,6 +7,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import os from 'os';
+import fs from 'fs';
 import expressWinston from 'express-winston';
 import logger from './config/logger.js';
 import authRoutes from './routes/auth.js';
@@ -238,14 +239,28 @@ app.use((req, res, next) => {
   next();
 });
 
+// Helper function to parse allowed origins from environment variable
+function getAllowedOrigins(): string[] {
+  const origins = process.env.ALLOWED_ORIGINS?.split(',')
+    .map(o => o.trim())
+    .filter(o => o.length > 0) || [];
+  
+  return origins;
+}
+
 // CORS configuration - whitelist allowed origins from environment
+const allowedOrigins = getAllowedOrigins();
+
 app.use(
   cors({
     origin: (origin, callback) => {
       // Allow requests with no origin (like mobile apps or curl)
       if (!origin) return callback(null, true);
 
-      const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()) || [];
+      // In development, allow all origins for easier local testing
+      if (process.env.NODE_ENV !== 'production' && allowedOrigins.length === 0) {
+        return callback(null, true);
+      }
 
       if (allowedOrigins.includes(origin)) {
         callback(null, true);
@@ -317,7 +332,10 @@ app.use('/api/share', csrfProtection, shareRoutes);
 // Socket.io setup with security
 const io = new Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>(httpServer, {
   cors: {
-    origin: process.env.NODE_ENV === 'production' ? process.env.ALLOWED_ORIGINS?.split(',') : true, // Allow all origins in development for network access
+    // Use the same allowed origins as Express CORS, or allow all in development if none configured
+    origin: process.env.NODE_ENV === 'production' 
+      ? (allowedOrigins.length > 0 ? allowedOrigins : false)
+      : true, // Allow all origins in development for network access
     credentials: true,
   },
   // Security: limit payload size
@@ -456,7 +474,47 @@ function getShell(): string {
   if (os.platform() === 'win32') {
     return 'powershell.exe';
   }
-  return process.env.SHELL || '/bin/bash';
+  
+  // Allow override via environment variable (highest priority)
+  if (process.env.TERMINAL_SHELL) {
+    return process.env.TERMINAL_SHELL;
+  }
+  
+  // Try common shells in order of preference
+  // Note: Alpine Linux typically only has /bin/sh, not bash
+  const possibleShells = [
+    process.env.SHELL,           // User's default shell (usually zsh on modern macOS)
+    '/bin/zsh',                  // macOS default (prioritize zsh)
+    '/opt/homebrew/bin/zsh',     // Homebrew zsh on Apple Silicon
+    '/usr/local/bin/zsh',        // Homebrew zsh on Intel Mac
+    '/bin/bash',                 // Most common on Linux (not in Alpine by default)
+    '/bin/sh',                   // POSIX shell (always available, even in Alpine)
+    '/usr/bin/bash',             // Alternative bash location
+  ].filter(Boolean) as string[]; // Remove undefined values
+  
+  // Return first available shell
+  // Check both existence and readability (executable check)
+  for (const shell of possibleShells) {
+    try {
+      // Check if shell exists and is readable
+      if (fs.existsSync(shell)) {
+        // Try to access it to ensure it's readable
+        fs.accessSync(shell, fs.constants.R_OK);
+        return shell;
+      }
+    } catch {
+      // Continue to next shell if this one doesn't work
+      continue;
+    }
+  }
+  
+  // Final fallback to sh (should always exist on Unix-like systems)
+  // This is the only shell guaranteed to exist in minimal environments like Alpine
+  logger.warn('No preferred shell found, using /bin/sh as fallback', {
+    checkedShells: possibleShells,
+    platform: os.platform(),
+  });
+  return '/bin/sh';
 }
 
 // Verify terminal ownership (multi-device aware)
@@ -549,15 +607,84 @@ io.on('connection', (socket: Socket<ClientToServerEvents, ServerToClientEvents, 
       const terminalIdPrefix = userId ? `user-${userId}` : `anon-${socket.id}`;
       const terminalId = `${terminalIdPrefix}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-      // Spawn terminal
-      const shell = getShell();
-      const term = pty.spawn(shell, [], {
-        name: 'xterm-256color',
-        cols: data.cols || 80,
-        rows: data.rows || 24,
-        cwd: process.env.HOME || process.cwd(),
-        env: process.env,
-      });
+      // Spawn terminal - try multiple shells if first fails
+      let shell = getShell();
+      logger.debug('Spawning terminal', { shell, platform: os.platform() });
+      
+      // Fallback shells to try if primary fails
+      // Try zsh locations first, then sh as last resort
+      const fallbackShells = [
+        '/bin/zsh',
+        '/opt/homebrew/bin/zsh',
+        '/usr/local/bin/zsh',
+        '/bin/sh',
+        '/usr/bin/sh',
+      ];
+      
+      let term: pty.IPty | null = null;
+      let lastError: Error | null = null;
+      let shellsTried = [shell];
+      
+      // Try primary shell first
+      try {
+        term = pty.spawn(shell, [], {
+          name: 'xterm-256color',
+          cols: data.cols || 80,
+          rows: data.rows || 24,
+          cwd: process.env.HOME || process.cwd(),
+          env: process.env,
+        });
+      } catch (spawnError: any) {
+        lastError = spawnError;
+        logger.warn('Failed to spawn terminal with primary shell, trying fallbacks', {
+          primaryShell: shell,
+          error: spawnError.message,
+          errorCode: spawnError.code,
+          errorStack: spawnError.stack,
+        });
+        
+        // Try fallback shells
+        for (const fallbackShell of fallbackShells) {
+          if (fallbackShell === shell) continue; // Skip if already tried
+          
+          try {
+            logger.debug('Trying fallback shell', { fallbackShell });
+            term = pty.spawn(fallbackShell, [], {
+              name: 'xterm-256color',
+              cols: data.cols || 80,
+              rows: data.rows || 24,
+              cwd: process.env.HOME || process.cwd(),
+              env: process.env,
+            });
+            shell = fallbackShell; // Update shell variable for logging
+            logger.info('Successfully spawned terminal with fallback shell', { shell: fallbackShell });
+            break; // Success!
+          } catch (fallbackError: any) {
+            shellsTried.push(fallbackShell);
+            lastError = fallbackError;
+            logger.debug('Fallback shell also failed', {
+              shell: fallbackShell,
+              error: fallbackError.message,
+              errorCode: fallbackError.code,
+            });
+            continue; // Try next fallback
+          }
+        }
+        
+        // If all shells failed
+        if (!term) {
+          logger.error('Failed to spawn terminal with all shells', {
+            shellsTried,
+            lastError: lastError?.message,
+            platform: os.platform(),
+            shellEnv: process.env.SHELL,
+          });
+          callback({
+            error: `Failed to create terminal: Cannot spawn any shell. Tried: ${shellsTried.join(', ')}. Please ensure at least /bin/sh is available.`,
+          });
+          return;
+        }
+      }
 
       // Persist terminal session to database (always create session for sharing support)
       let sessionId: string | undefined;
@@ -825,17 +952,30 @@ io.on('connection', (socket: Socket<ClientToServerEvents, ServerToClientEvents, 
         const cols = dbSession.cols || 80;
         const rows = dbSession.rows || 24;
 
-        const term = pty.spawn(shell, [], {
-          name: 'xterm-256color',
-          cols,
-          rows,
-          cwd,
-          env: {
-            ...process.env,
-            TERM: 'xterm-256color',
-            COLORTERM: 'truecolor',
-          },
-        });
+        let term: pty.IPty;
+        try {
+          term = pty.spawn(shell, [], {
+            name: 'xterm-256color',
+            cols,
+            rows,
+            cwd,
+            env: {
+              ...process.env,
+              TERM: 'xterm-256color',
+              COLORTERM: 'truecolor',
+            },
+          });
+        } catch (spawnError: any) {
+          logger.error('Failed to spawn terminal on reconnect', {
+            shell,
+            error: spawnError.message,
+            terminalId,
+          });
+          callback({
+            error: `Failed to reconnect terminal: Cannot spawn shell '${shell}'. Please check that the shell exists and is executable.`,
+          });
+          return;
+        }
 
         // Store terminal instance
         terminals.set(terminalId, {
@@ -2344,12 +2484,16 @@ async function startServer() {
     maxTerminals: MAX_TERMINALS,
     authRequired: process.env.REQUIRE_AUTH === 'true',
     redisMode: redisStatus,
+    allowedOrigins: allowedOrigins.length > 0 ? allowedOrigins : (process.env.NODE_ENV === 'production' ? 'none (CORS disabled)' : 'all (development)'),
     localUrl: `http://localhost:${portStr}`,
     networkUrl: `http://${networkAddress}:${portStr}`,
   });
 
   // Pretty console output for development
   if (process.env.NODE_ENV !== 'production') {
+    const corsInfo = allowedOrigins.length > 0 
+      ? allowedOrigins.join(', ').substring(0, 38).padEnd(38)
+      : 'All origins (development)'.padEnd(38);
     console.log(`
 ╔═══════════════════════════════════════════════╗
 ║         TriTerm Server Running                ║
@@ -2359,6 +2503,7 @@ async function startServer() {
 ║  Max Terminals: ${MAX_TERMINALS.toString().padEnd(28)} ║
 ║  Auth Required: ${(process.env.REQUIRE_AUTH === 'true' ? 'Yes' : 'No').padEnd(28)} ║
 ║  Redis: ${redisStatus.padEnd(36)} ║
+║  CORS Origins: ${corsInfo} ║
 ╠═══════════════════════════════════════════════╣
 ║  Local:   http://localhost:${portStr.padEnd(23)} ║
 ║  Network: http://${networkAddress}:${portStr.padEnd(23)} ║

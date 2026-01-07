@@ -16,7 +16,7 @@ const WEAK_PASSWORDS = [
 /**
  * Enhanced password validation with security best practices
  * Requirements:
- * - Minimum 12 characters
+ * - Minimum 8 characters
  * - At least one uppercase letter
  * - At least one lowercase letter
  * - At least one number
@@ -26,7 +26,7 @@ const WEAK_PASSWORDS = [
  */
 const passwordValidator = z
   .string()
-  .min(12, 'Password must be at least 12 characters')
+  .min(8, 'Password must be at least 8 characters')
   .max(128, 'Password must be at most 128 characters')
   .regex(/[A-Z]/, 'Password must contain at least one uppercase letter')
   .regex(/[a-z]/, 'Password must contain at least one lowercase letter')

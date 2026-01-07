@@ -44,7 +44,7 @@ TriTerm brings the power of your terminal to the browser with enterprise feature
 
 - ✅ **Enhanced security headers** (CSP, HSTS, X-Frame-Options, Permissions-Policy)
 - ✅ **Request size limits** (DoS protection)
-- ✅ **Password complexity enforcement** (12+ chars, uppercase, lowercase, numbers, special characters)
+- ✅ **Password complexity enforcement** (8+ chars, uppercase, lowercase, numbers, special characters)
 - ✅ **Common password blocking** (weak password prevention)
 - ✅ **Account lockout** (5 failed attempts = 15 min lockout)
 - ✅ **JWT token revocation** (immediate logout support)
@@ -583,7 +583,7 @@ TriTerm implements enterprise-grade security measures aligned with OWASP Top 10 
 
 **Password Security**
 
-- ✅ Minimum 12 characters required
+- ✅ Minimum 8 characters required
 - ✅ Complexity requirements (uppercase, lowercase, numbers, special chars)
 - ✅ Common password blocking
 - ✅ Bcrypt hashing (12 rounds)
