@@ -98,13 +98,14 @@ export default defineConfig({
   server: {
     host: true, // Listen on all addresses (0.0.0.0)
     port: 5173,
+    allowedHosts: ['term.jumaworks.dev'],
     proxy: {
       '/api': {
-        target: 'http://localhost:3000',
+        target: 'http://localhost:3000', // Backend dev server
         changeOrigin: true,
       },
       '/socket.io': {
-        target: 'http://localhost:3000',
+        target: 'http://localhost:3000', // Backend dev server
         ws: true,
       },
     },

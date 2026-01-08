@@ -5,6 +5,11 @@ import { getDeviceInfo } from '../lib/deviceId';
 
 // Automatically determine the server URL
 function getServerUrl(): string {
+  // If VITE_API_URL is set, use it (for separate backend domain)
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+
   // In development with Vite proxy, we can use the same origin
   // In production or network access, connect to port 3000 on the current host
   if (import.meta.env.DEV) {

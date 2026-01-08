@@ -1413,64 +1413,13 @@ io.on('connection', (socket: Socket<ClientToServerEvents, ServerToClientEvents, 
         return;
       }
 
-      // Check if terminal has active share links
-      let hasActiveShareLinks = false;
-      let hasActiveConnections = false;
-      try {
-        const activeShareLinks = await prisma.sharedLink.findMany({
-          where: {
-            terminalId,
-            active: true,
-            expiresAt: { gt: new Date() },
-          },
-          include: {
-            activeConnections: {
-              where: {
-                disconnectedAt: null,
-              },
-            },
-          },
-        });
-
-        hasActiveShareLinks = activeShareLinks.length > 0;
-        hasActiveConnections = activeShareLinks.some(link => link.activeConnections.length > 0);
-      } catch (error) {
-        logger.error('Error checking share links before closing terminal', {
-          terminalId,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        });
-      }
-
-      if (hasActiveShareLinks || hasActiveConnections) {
-        // Terminal has active share links or connected external users
-        // Detach it from owner but keep it alive
-        logger.info('Terminal has active share links, detaching instead of closing', {
-          terminalId,
-          socketId: socket.id,
-          userId: terminal.userId,
-          hasActiveShareLinks,
-          hasActiveConnections,
-        });
-
-        // Remove socket from registry but don't kill the terminal
-        if (terminal.userId) {
-          await userTerminalRegistry.removeSocket(terminal.userId, terminalId, socket.id);
-          await userTerminalRegistry.removeSocketFromDatabase(socket.id);
-        }
-
-        const count = terminalCounts.get(socket.id) || 0;
-        terminalCounts.set(socket.id, Math.max(0, count - 1));
-
-        // Notify owner that terminal was detached instead of closed
-        socket.emit('terminal-detached', {
-          terminalId,
-          reason: 'Terminal has active share links and will remain available for shared users',
-        });
-
-        return;
-      }
-
-      logger.info('Closing terminal', { terminalId, socketId: socket.id, userId: terminal.userId });
+      // Case 1: Manual close - always kill the terminal immediately
+      // Note: Share links are not checked - manual close always kills
+      logger.info('Closing terminal (manual close)', { 
+        terminalId, 
+        socketId: socket.id, 
+        userId: terminal.userId,
+      });
       terminal.term.kill();
       terminals.delete(terminalId);
 
@@ -2232,11 +2181,13 @@ io.on('connection', (socket: Socket<ClientToServerEvents, ServerToClientEvents, 
             remainingDevices: remainingSockets.length,
           });
         } else {
-          logger.info('Multi-device: Last device disconnected, terminal detached (kept alive for reconnection)', {
+          logger.info('Multi-device: Last device disconnected, terminal detached (kept alive based on SESSION_TIMEOUT)', {
             terminalId,
             socketId: socket.id,
             userId: terminalUserId,
             bufferSize: terminals.get(terminalId)?.outputBuffer.length || 0,
+            lastActivityAt: terminals.get(terminalId)?.lastActivityAt,
+            timeoutIn: Math.round((SESSION_TIMEOUT_MS - (Date.now() - (terminals.get(terminalId)?.lastActivityAt || Date.now()))) / 60000) + ' minutes',
           });
         }
       }
@@ -2246,11 +2197,13 @@ io.on('connection', (socket: Socket<ClientToServerEvents, ServerToClientEvents, 
       for (const [terminalId, terminal] of terminals.entries()) {
         if (terminal.socketId === socket.id) {
           detachedCount++;
-          logger.info('Terminal detached (kept alive for reconnection)', {
+          logger.info('Terminal detached (kept alive based on SESSION_TIMEOUT)', {
             terminalId,
             socketId: socket.id,
             userId: terminal.userId,
             bufferSize: terminal.outputBuffer.length,
+            lastActivityAt: terminal.lastActivityAt,
+            timeoutIn: Math.round((SESSION_TIMEOUT_MS - (Date.now() - terminal.lastActivityAt)) / 60000) + ' minutes',
           });
         }
       }
@@ -2334,50 +2287,17 @@ io.on('connection', (socket: Socket<ClientToServerEvents, ServerToClientEvents, 
   });
 });
 
-// Cleanup inactive terminals periodically (multi-device aware)
+// Cleanup inactive terminals periodically
+// Case 2: Timeout - kill terminals after SESSION_TIMEOUT_MS of inactivity
+// Terminals are kept alive based on SESSION_TIMEOUT regardless of device connections
 setInterval(async () => {
   const now = Date.now();
   const terminalsToKill: string[] = [];
 
   for (const [terminalId, terminal] of terminals.entries()) {
-    // Multi-device: Check if any device has recent activity
-    let hasRecentActivity = false;
-
-    if (terminal.userId) {
-      // For authenticated users, check if any device is still connected
-      const hasConnectedDevices = await userTerminalRegistry.hasConnectedDevices(terminal.userId, terminalId);
-
-      if (hasConnectedDevices) {
-        // If devices are connected, check their last activity
-        const devices = await userTerminalRegistry.getDevicesForTerminal(terminal.userId, terminalId);
-        hasRecentActivity = devices.some(device =>
-          now - device.lastPingAt.getTime() < SESSION_TIMEOUT_MS
-        );
-      }
-    }
-
-    // Check if terminal has active share links - don't kill if it does
-    let hasActiveShareLinks = false;
-    try {
-      const activeShareLinks = await prisma.sharedLink.findMany({
-        where: {
-          terminalId,
-          active: true,
-          expiresAt: { gt: new Date() },
-        },
-      });
-      hasActiveShareLinks = activeShareLinks.length > 0;
-    } catch (error) {
-      logger.error('Error checking share links for terminal', {
-        terminalId,
-        error: error instanceof Error ? error.message : 'Unknown error',
-      });
-    }
-
     // Kill terminals that have been inactive for SESSION_TIMEOUT_MS
-    // AND have no connected devices with recent activity
-    // AND have no active share links
-    if (!hasRecentActivity && !hasActiveShareLinks && now - terminal.lastActivityAt > SESSION_TIMEOUT_MS) {
+    // Note: Device connections and share links are ignored - only inactivity timeout matters
+    if (now - terminal.lastActivityAt > SESSION_TIMEOUT_MS) {
       terminalsToKill.push(terminalId);
     }
   }
@@ -2387,10 +2307,11 @@ setInterval(async () => {
     if (terminal) {
       const inactiveMinutes = Math.round((now - terminal.lastActivityAt) / 60000);
 
-      logger.info('Killing inactive terminal', {
+      logger.info('Killing inactive terminal (timeout)', {
         terminalId,
         userId: terminal.userId,
         inactiveFor: inactiveMinutes + ' minutes',
+        reason: 'SESSION_TIMEOUT exceeded',
       });
 
       try {

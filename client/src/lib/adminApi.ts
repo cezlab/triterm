@@ -2,6 +2,11 @@ import { getAccessToken } from './tokenStorage';
 
 // Automatically determine the API URL based on current hostname
 function getApiUrl(): string {
+  // If VITE_API_URL is set, use it (for separate backend domain)
+  if (import.meta.env.VITE_API_URL) {
+    return `${import.meta.env.VITE_API_URL}/api`;
+  }
+
   if (import.meta.env.DEV) {
     // Development mode - use current hostname with port 3000
     const hostname = window.location.hostname;
